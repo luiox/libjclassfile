@@ -1,0 +1,12 @@
+build/
+.xmake/
+compile_commands.json
+.vscode/
+.idea/
+/test/out/
+/test/tmp/
+*.pyc
+*.class
+*.jar
+!test_resource/**
+!test_resource/**/*
