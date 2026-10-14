@@ -50,6 +50,11 @@ public:
     ca::u64                                     readLong();
     double                                      readDouble();
     std::string                                 readUTF();
+    /// @brief 读取一段 modified-UTF-8 字节，返回借用视图。
+    ///
+    /// 借用契约：返回的 MUtf8StringRef 指向底层缓冲区（构造时传入的
+    /// vector 或父流缓冲），不持有数据。底层流对象析构或缓冲被替换前，
+    /// 该视图保持有效；跨流生命周期持有视图属于悬垂引用。
     [[nodiscard]] jstr::MUtf8StringRef readMutf8Ref();
     void                                        readFully(std::vector<ca::u8>& dest, int n);
 
