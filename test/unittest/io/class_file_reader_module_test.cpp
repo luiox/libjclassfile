@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "jclassfile/io/class_file_reader.hpp"
+#include "jclassfile/io/class_file_writer.hpp"
 #include "jclassfile/model/class_file.hpp"
 #include "jclassfile/model/constant/cp_entry.hpp"
 #include "libca/core/datatype.hpp"
@@ -270,6 +271,70 @@ TEST(ClassFileReaderModuleTest, DowngradedModuleClassDropsCpPackageToo)
 
     EXPECT_EQ(clazz.getAccess(), 0);
     EXPECT_FALSE(hasPackagePoolEntry(clazz, 13));
+}
+
+// ---------- 降级路径不得销毁仍被指令引用的 CpModule ----------
+
+// ACC_MODULE + 1 method + Code(LDC #4)：方法携带的 Code 指令仍引用池中
+// CpModule。旧实现在 instructionRefs 收集之前先行销毁 CpModule/CpPackage
+// （无指令引用防护），LDC 的 entry_ 悬垂，写路径解引用即 heap-use-after-free。
+// 修复口径：模块清理并入末尾统一清理循环，共用指令引用防护——被引用条目
+// 保留，未引用条目照常丢弃。
+TEST(ClassFileReaderModuleTest, DowngradedModuleClassKeepsInstructionReferencedCpModule)
+{
+    std::vector<ca::u8> buf;
+    appendInt(buf, 0xCAFEBABE);
+    appendShort(buf, 0);
+    appendShort(buf, 53);   // JAVA9
+    appendShort(buf, 10);   // numConstants
+    appendUtf8Entry(buf, "module-info");       // #1
+    appendClassEntry(buf, 1);                  // #2 this
+    appendUtf8Entry(buf, "TestModule");        // #3
+    appendModuleEntry(buf, 3);                 // #4 CpModule（LDC 目标）
+    appendUtf8Entry(buf, "Code");              // #5
+    appendUtf8Entry(buf, "m");                 // #6
+    appendUtf8Entry(buf, "()V");               // #7
+    appendUtf8Entry(buf, "java/lang/Object");  // #8
+    appendClassEntry(buf, 8);                  // #9 super
+    appendShort(buf, 0x8000);                  // ACC_MODULE
+    appendShort(buf, 2);                       // this = #2
+    appendShort(buf, 9);                       // super = #9（非 0 → 降级）
+    appendShort(buf, 0);                       // interfaces
+    appendShort(buf, 0);                       // fields
+    appendShort(buf, 1);                       // methods
+    appendShort(buf, 0x0008);                  //   ACC_STATIC
+    appendShort(buf, 6);                       //   name = #6
+    appendShort(buf, 7);                       //   desc = #7
+    appendShort(buf, 1);                       //   attributes
+    appendShort(buf, 5);                       //     Code name = #5
+    appendInt(buf, 14);                        //     length
+    appendShort(buf, 0);                       //     max_stack
+    appendShort(buf, 0);                       //     max_locals
+    appendInt(buf, 2);                         //     code_length
+    buf.push_back(0x12);                       //     LDC
+    buf.push_back(4);                          //     cp_index = #4
+    appendShort(buf, 0);                       //     exception_table_length
+    appendShort(buf, 0);                       //     attributes_count
+    appendShort(buf, 0);                       // class attributes
+
+    ClassFileReader reader;
+    ClassFile       clazz = reader.read(buf);
+
+    // 降级仍然发生：ACC_MODULE 清除。
+    EXPECT_EQ(clazz.getAccess(), 0);
+    // 指令引用的 CpModule 必须保留（旧实现已销毁 → 此处为悬垂残留）。
+    EXPECT_TRUE(hasModulePoolEntry(clazz, 4));
+
+    // 写路径解引用 LDC 的 entry：旧实现在此 UAF（ASan heap-use-after-free）。
+    ClassFileWriter   writer;
+    std::vector<ca::u8> out;
+    EXPECT_NO_THROW(out = writer.write(clazz));
+    EXPECT_FALSE(out.empty());
+
+    // 写出结果可再读，CpModule 随指令一起存活。
+    ClassFileReader reader2;
+    ClassFile       reread = reader2.read(out);
+    EXPECT_TRUE(hasModulePoolEntry(reread, 4));
 }
 
 // ---------- 普通 class：moduleAccess 门控不误伤 ----------

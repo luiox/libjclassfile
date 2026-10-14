@@ -252,22 +252,14 @@ ClassFile ClassFileReader::read(const std::vector<ca::u8>& code)
             builder.addAttribute(attr);
         }
 
-        // 模块元数据属性全部丢弃后，CpModule/CpPackage 不再可被引用，一并清理。
-        if (dropModuleContent) {
-            ConstPool& pool = builder.getPool();
-            for (int i = static_cast<int>(pool.size()) - 1; i >= 1; --i) {
-                const CpEntry* entry = pool.get(i);
-                if (entry == nullptr) continue;
-                if (entry->tag() == CpTag::MODULE || entry->tag() == CpTag::PACKAGE) {
-                    (void)pool.remove(i);
-                }
-            }
-        }
-
         auto& poolEntries = builder.getPool();
         // Code 指令持有的 CpRef 操作数是裸指针：remove 即销毁对象，会使这些
         // 指针悬垂（上游 Java 靠 GC 天然存活，transformer 之后才按校验结果
         // stub 掉引用非法常量的指令）。这里先收集全部指令引用，删除时跳过。
+        // 模块元数据清理（dropModuleContent 时移除 CpModule/CpPackage）必须
+        // 并入下面的统一清理循环共用此防护：旧实现先行独立删除发生在引用
+        // 收集之前，Code 里 LDC 指向 module 条目时即产生悬垂指针，写路径
+        // 解引用为 heap-use-after-free。
         std::vector<const CpEntry*> instructionRefs;
         for (const Method* m : builder.getMethods()) {
             for (const Attribute* a : m->attributes()) {
@@ -283,7 +275,12 @@ ClassFile ClassFileReader::read(const std::vector<ca::u8>& code)
         }
         for (int i = static_cast<int>(poolEntries.size()) - 1; i >= 1; --i) {
             const CpEntry* entry = poolEntries.get(i);
-            if (entry == nullptr || !Placeholders::containsPlaceholder(entry)) continue;
+            if (entry == nullptr) continue;
+            // 两类待清理条目：引用 placeholder 的残条目，与降级 module class
+            // 不再需要的模块元数据条目。其余一律不动。
+            bool dropModuleMeta = dropModuleContent && (entry->tag() == CpTag::MODULE ||
+                                                        entry->tag() == CpTag::PACKAGE);
+            if (!dropModuleMeta && !Placeholders::containsPlaceholder(entry)) continue;
             // 类头三组引用（thisClass/superClass/interfaces）不经过属性粒度的
             // placeholder 丢弃检查（readAttribute 的 cpAccesses 检查只覆盖
             // attribute 引用）。它们仍指向待销毁条目时保留条目本身，只清理
@@ -291,10 +288,11 @@ ClassFile ClassFileReader::read(const std::vector<ca::u8>& code)
             // 对象产生垃圾字节（issue #876 写回损坏的根因）。
             const CpClass* entryAsClass = asCpClass(entry);
             const auto&    interfaces   = builder.getInterfaces();
-            bool headerReferenced = builder.getThisClass() == entryAsClass ||
-                                    builder.getSuperClass() == entryAsClass ||
-                                    std::find(interfaces.begin(), interfaces.end(), entryAsClass) !=
-                                        interfaces.end();
+            bool headerReferenced =
+                entryAsClass != nullptr &&
+                (builder.getThisClass() == entryAsClass ||
+                 builder.getSuperClass() == entryAsClass ||
+                 std::find(interfaces.begin(), interfaces.end(), entryAsClass) != interfaces.end());
             // 同理，仍被 Code 指令引用的条目保留，避免指令悬垂指针。
             bool codeReferenced =
                 std::find(instructionRefs.begin(), instructionRefs.end(), entry) !=
