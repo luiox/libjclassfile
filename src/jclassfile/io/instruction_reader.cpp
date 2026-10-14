@@ -38,6 +38,14 @@ using jclassfile::model::CpEntry;
 
 namespace Opcodes = jclassfile::model::Opcodes;
 
+// 注：CpRef 指令（LDC、INVOKEINTERFACE 等）引用哪个池条目，reader 不校验。
+// reader 的职责是读入什么就保留什么（字节级 round-trip）：任意 CpEntry 都
+// 可作为 LDC 目标，INVOKEINTERFACE 接受 MethodRef。tag 与宽窄槽是否匹配由
+// IllegalStrippingTransformer 在转换阶段判定并替换非法条目；null/错 tag 的
+// 条目在写路径由 InstructionWriter 抛 InvalidClassException。例外：
+// NEW/ANEWARRAY/CHECKCAST/INSTANCEOF 在 reader 端校验 CpClass，这是既有
+// 行为，保持不变。
+
 std::vector<std::unique_ptr<Instruction>> InstructionReader::read(
     IndexableByteStream& is, const jclassfile::model::ConstPool& pool, int codeLength)
 {
