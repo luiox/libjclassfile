@@ -31,6 +31,7 @@
 #include "jclassfile/model/constant/cp_utf8.hpp"
 #include "jclassfile/model/attribute/bootstrap_methods_attribute.hpp"
 #include "jclassfile/model/attribute/code_attribute.hpp"
+#include "jclassfile/model/instruction/opcodes.hpp"
 #include "jclassfile/model/attribute/record_attribute.hpp"
 #include "jclassfile/model/field.hpp"
 #include "jclassfile/model/method.hpp"
@@ -1253,4 +1254,113 @@ TEST(ClassFileReaderTest, PrimitiveElementTagMismatchIsRejected)
     // 'I' + INTEGER(#8)：匹配 → 保留。
     auto ok = r.read(buildClassWithPrimitiveElement('I', 8));
     ASSERT_EQ(ok.attributes().size(), 1u);
+}
+
+// ---------- CpRef 指令的池条目校验 ----------
+
+// 带 1 个 method（Code: NOP + member-ref 指令）的最小 class。前导 NOP 让方法
+// 指令数 > 1，绕开 transformer removeInvalidInstructions 的 size<=1 早退，使
+// stub 循环可达。refIndex 为指令的 cp index：0 → 槽空（get 返回 nullptr）；
+// 8 → 指向 Utf8（tag 与 member-ref 不符）。
+std::vector<ca::u8> buildClassWithMemberRefInsn(ca::u16 refIndex)
+{
+    std::vector<ca::u8> buf;
+    appendInt(buf, 0xCAFEBABE);
+    appendShort(buf, 0);
+    appendShort(buf, 52);   // JAVA8
+    appendShort(buf, 9);
+    appendUtf8Entry(buf, "Code");        // #1
+    appendUtf8Entry(buf, "m");           // #2
+    appendUtf8Entry(buf, "()V");         // #3
+    appendUtf8Entry(buf, "Foo");         // #4
+    appendClassEntry(buf, 4);            // #5 this
+    appendUtf8Entry(buf, "Bar");         // #6
+    appendClassEntry(buf, 6);            // #7 super
+    appendUtf8Entry(buf, "some/Type");   // #8（错 tag 目标）
+    appendShort(buf, 0x0021);
+    appendShort(buf, 5);   // this
+    appendShort(buf, 7);   // super
+    appendShort(buf, 0);   // interfaces
+    appendShort(buf, 0);   // fields
+    appendShort(buf, 1);   // methods
+    appendShort(buf, 0x0001);
+    appendShort(buf, 2);   // name = #2
+    appendShort(buf, 3);   // desc = #3
+    appendShort(buf, 1);   // attributes
+    appendShort(buf, 1);   //   Code name = #1
+    appendInt(buf, 16);    //   length: 2+2+4+4+2+2
+    appendShort(buf, 1);   //   max_stack
+    appendShort(buf, 1);   //   max_locals
+    appendInt(buf, 4);     //   code_length
+    buf.push_back(0x00);   //   NOP
+    buf.push_back(0xB2);   //   GETSTATIC
+    appendShort(buf, refIndex);
+    appendShort(buf, 0);   //   exception_table_length
+    appendShort(buf, 0);   //   attributes_count
+    appendShort(buf, 0);   // class attributes
+    return buf;
+}
+
+// GETSTATIC + index 0：池槽为哨兵（get → nullptr）。reader 契约是 1:1 宽容
+// （InstructionRoundTrip 钉死），null entry 穿透进模型；未 transform 直接写出
+// 时由写路径前置校验抛 InvalidClassException（旧行为：SEGV 硬件异常直通进程死）。
+TEST(CpRefValidationTest, NullPoolEntryMemberRefThrowsOnDirectWrite)
+{
+    ClassFileReader reader;
+    ClassFile       clazz = reader.read(buildClassWithMemberRefInsn(0));
+    ASSERT_EQ(clazz.getMethods().size(), 1u);
+    // reader 不剥离：Code 属性带着 null entry 存活。
+    ASSERT_EQ(clazz.getMethods()[0]->attributes().size(), 1u);
+
+    ClassFileWriter writer;
+    EXPECT_THROW((void)writer.write(clazz), InvalidClassException);
+}
+
+// 同一样本经 IllegalStrippingTransformer：null entry 一律 stub（与 LDC 族既有
+// 策略统一），transform → write 全程可捕获、可写出。
+TEST(CpRefValidationTest, NullPoolEntryMemberRefIsStubbedByTransformer)
+{
+    ClassFileReader reader;
+    ClassFile       clazz = reader.read(buildClassWithMemberRefInsn(0));
+    ASSERT_EQ(clazz.getMethods()[0]->attributes().size(), 1u);
+
+    transform::IllegalStrippingTransformer(clazz).transform();
+
+    const Attribute* codeAttr = nullptr;
+    for (const Attribute* a : clazz.getMethods()[0]->attributes()) {
+        if (a->name().text() == "Code") {
+            codeAttr = a;
+            break;
+        }
+    }
+    ASSERT_NE(codeAttr, nullptr);
+    const auto* code = static_cast<const CodeAttribute*>(codeAttr);
+    // [NOP, GETSTATIC(3B)] → GETSTATIC stub 为 2 NOP + RETURN（字节宽度保持，
+    // 与 Ldc2WWithNonWideConstantIsStubbed 同一布局）：[NOP, NOP, NOP, RETURN]。
+    namespace Opcodes = jclassfile::model::Opcodes;
+    ASSERT_EQ(code->instructions().size(), 4u);
+    EXPECT_EQ(code->instructions()[0]->getOpcode(), Opcodes::NOP);
+    EXPECT_EQ(code->instructions()[2]->getOpcode(), Opcodes::NOP);
+    EXPECT_EQ(code->instructions()[3]->getOpcode(), Opcodes::RETURN);
+
+    ClassFileWriter   writer;
+    std::vector<ca::u8> out;
+    EXPECT_NO_THROW(out = writer.write(clazz));
+    EXPECT_FALSE(out.empty());
+}
+
+// GETSTATIC + index 指向 Utf8：tag 与 Field/MethodRef 不符。reader 宽容读取；
+// 写路径仅回写 index（与 Java 原版一致的安全回写，不解引用），round-trip 可完成。
+TEST(CpRefValidationTest, WrongTagMemberRefRoundTripsVerbatim)
+{
+    ClassFileReader reader;
+    ClassFile       clazz = reader.read(buildClassWithMemberRefInsn(8));
+    ASSERT_EQ(clazz.getMethods().size(), 1u);
+    ASSERT_EQ(clazz.getMethods()[0]->attributes().size(), 1u);
+
+    ClassFileWriter   writer;
+    std::vector<ca::u8> out;
+    EXPECT_NO_THROW(out = writer.write(clazz));
+    // 复制纪律：未 transform 的畸形样本原样写回。
+    EXPECT_EQ(out, buildClassWithMemberRefInsn(8));
 }

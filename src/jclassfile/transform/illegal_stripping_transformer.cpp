@@ -343,7 +343,11 @@ void IllegalStrippingTransformer::removeInvalidInstructions(CodeAttribute& code)
         else if (insn->kind() == InsnKind::CpRef) {
             auto*          ldc   = static_cast<CpRefInstruction*>(insn);
             const CpEntry* entry = ldc->getEntry();
-            bool           stub  = false;
+            // null entry（畸形输入里 cp index 指向哨兵/越界槽）：一律视为非法
+            // 指令，与 LDC 族既有 stub 策略统一（正常类不会出现 null entry，
+            // 此分支只影响畸形输入）。旧实现只对 LDC 族兜底，member-ref /
+            // INVOKEDYNAMIC 的 null entry 穿透到写路径解引用即进程级 SEGV。
+            bool stub = entry == nullptr;
             if (entry && entry->isConstDynamic()) {
                 std::unordered_set<const ConstDynamic*> active;
                 stub = !isValidDynamic(static_cast<const ConstDynamic*>(entry), active);

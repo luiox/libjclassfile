@@ -6,10 +6,12 @@
 #include <stdexcept>
 #include <utility>
 
+#include "jclassfile/invalid_class_exception.hpp"
 #include "jclassfile/model/constant/const_ref.hpp"
 #include "jclassfile/model/constant/cp_class.hpp"
 #include "jclassfile/model/constant/cp_name_type.hpp"
 #include "jclassfile/model/constant/cp_utf8.hpp"
+#include "jclassfile/model/constant_pool_constants.hpp"
 #include "jclassfile/model/descriptor.hpp"
 #include "jclassfile/model/instruction/cp_ref_instruction.hpp"
 #include "jclassfile/model/instruction/iinc_instruction.hpp"
@@ -32,8 +34,25 @@ using jclassfile::model::TableSwitchInstruction;
 using jclassfile::model::WideInstruction;
 using jclassfile::model::ConstRef;
 using jclassfile::model::Descriptor;
+using jclassfile::model::CpNameType;
 
 namespace Opcodes = jclassfile::model::Opcodes;
+
+namespace {
+
+// CpRef 指令写路径前置校验：null entry 或错 tag 在写出前抛 InvalidClassException
+// （可捕获、带 opcode 上下文），替代旧实现直通硬件异常的 SEGV/UB。
+const jclassfile::model::CpEntry& requireCpRefEntry(const CpRefInstruction* cpref, int opcode)
+{
+    const jclassfile::model::CpEntry* entry = cpref->getEntry();
+    if (entry == nullptr) {
+        throw InvalidClassException("Instruction writes a null constant-pool reference for opcode " +
+                                    std::to_string(opcode));
+    }
+    return *entry;
+}
+
+}   // namespace
 
 std::vector<ca::u8> InstructionWriter::writeCode(const std::vector<const Instruction*>& list)
 {
@@ -244,7 +263,7 @@ std::vector<ca::u8> InstructionWriter::writeCode(const std::vector<const Instruc
         case LDC:
         {
             const auto* cpref = static_cast<const CpRefInstruction*>(instruction);
-            buffer.put(cpref->getEntry()->index() & 0xFF);
+            buffer.put(requireCpRefEntry(cpref, opcode).index() & 0xFF);
             break;
         }
         case LDC_W:
@@ -262,16 +281,35 @@ std::vector<ca::u8> InstructionWriter::writeCode(const std::vector<const Instruc
         case INSTANCEOF:
         {
             const auto* cpref = static_cast<const CpRefInstruction*>(instruction);
-            buffer.putShort(cpref->getEntry()->index() & 0xFFFF);
+            buffer.putShort(requireCpRefEntry(cpref, opcode).index() & 0xFFFF);
             break;
         }
         case INVOKEINTERFACE:
         {
             const auto* cpref = static_cast<const CpRefInstruction*>(instruction);
-            const auto* ref   = static_cast<const ConstRef*>(cpref->getEntry());
-            buffer.putShort(ref->index() & 0xFFFF);
+            const auto& entry = requireCpRefEntry(cpref, opcode);
+            // 非 ConstRef 族的条目（CpClass/Utf8 等）在旧实现下被 static_cast 后
+            // 连解三级（nameType/type 全是垃圾解引用，UB），前置拒绝；ConstRef
+            // 族内不区分 Field/Method/InterfaceMethodRef（InstructionRoundTrip
+            // 契约：writer 只要求可解析出 nameType）。
+            switch (entry.tag()) {
+            case jclassfile::model::CpTag::FIELD_REF:
+            case jclassfile::model::CpTag::METHOD_REF:
+            case jclassfile::model::CpTag::INTERFACE_METHOD_REF: break;
+            default:
+                throw InvalidClassException(
+                    "INVOKEINTERFACE references a non-constant-ref constant (tag " +
+                    std::to_string(static_cast<int>(entry.tag())) + ")");
+            }
+            const auto&       ref = static_cast<const ConstRef&>(entry);
+            const CpNameType* nt  = ref.nameType();
+            if (nt == nullptr || nt->type() == nullptr) {
+                throw InvalidClassException(
+                    "INVOKEINTERFACE references a constant ref without name/type");
+            }
+            buffer.putShort(entry.index() & 0xFFFF);
             // arg-count = 显式参数槽 + 1 (this)
-            int argSize = Descriptor(ref->nameType()->type()->text()).getParameterSize() + 1;
+            int argSize = Descriptor(nt->type()->text()).getParameterSize() + 1;
             buffer.put(argSize);
             buffer.put(0);
             break;
@@ -313,7 +351,7 @@ std::vector<ca::u8> InstructionWriter::writeCode(const std::vector<const Instruc
         case INVOKEDYNAMIC:
         {
             const auto* cpref = static_cast<const CpRefInstruction*>(instruction);
-            buffer.putShort(cpref->getEntry()->index() & 0xFFFF);
+            buffer.putShort(requireCpRefEntry(cpref, opcode).index() & 0xFFFF);
             buffer.putShort(0);
             break;
         }
@@ -356,6 +394,9 @@ std::vector<ca::u8> InstructionWriter::writeCode(const std::vector<const Instruc
         case MULTIANEWARRAY:
         {
             const auto* multi = static_cast<const MultiANewArrayInstruction*>(instruction);
+            if (multi->getDescriptor() == nullptr) {
+                throw InvalidClassException("MULTIANEWARRAY writes a null class reference");
+            }
             buffer.putShort(multi->getDescriptor()->index() & 0xFFFF);
             buffer.put(multi->getDimensions());
             break;
