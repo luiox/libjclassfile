@@ -140,6 +140,18 @@ void ConstPool::set(int index, std::unique_ptr<CpEntry> cp)
 {
     if (index < 1 || index >= static_cast<int>(backing_.size())) return;
     if (!cp) return;
+    // 宽槽配对强校验：padding 槽不可替换（替换后原 wide 条目的配对语义被
+    // 破坏，新条目对迭代器不可见）；宽窄错配拒绝（旧实现静默接受，注释自称
+    // "调用方保证"——产生的孤儿 padding 曾让 CpIterator 卡死）。set 的两种
+    // 同宽形态（窄→窄、wide→wide）语义不变，正常输入不受影响。
+    if (isFiller(index)) {
+        throw std::invalid_argument("Cannot replace a wide padding slot: " +
+                                    std::to_string(index));
+    }
+    if (backing_[static_cast<std::size_t>(index)]->isWide() != cp->isWide()) {
+        throw std::invalid_argument("Wide-slot mismatch in ConstPool::set at index " +
+                                    std::to_string(index));
+    }
     cp->setIndex(static_cast<ca::u16>(index));
     backing_[index] = std::move(cp);
 }
@@ -236,12 +248,21 @@ bool ConstPool::CpIterator::hasNext() const noexcept
 
 const CpEntry* ConstPool::CpIterator::next()
 {
-    if (!hasNext()) return nullptr;
-    CpEntry* cp = pool_->get(cursor_);
-    if (cp == nullptr) return nullptr;
-    lastCursor_ = cursor_;
-    cursor_ += cp->isWide() ? 2 : 1;
-    return cp;
+    // 空槽（哨兵/宽槽 padding，正常只在 wide 配对时被 +2 游标跳过）：跳进一格
+    // 继续找。旧实现在此返回 nullptr 且游标不动——宽槽错配（set 用窄条目覆盖
+    // wide 条目等）留下的孤儿 padding 会让 hasNext/next 循环永久卡死
+    // （class_file_writer 的写池循环与 transformer 的 forEach 同病）。
+    while (hasNext()) {
+        CpEntry* cp = pool_->get(cursor_);
+        if (cp == nullptr) {
+            ++cursor_;
+            continue;
+        }
+        lastCursor_ = cursor_;
+        cursor_ += cp->isWide() ? 2 : 1;
+        return cp;
+    }
+    return nullptr;
 }
 
 bool ConstPool::CpIterator::hasPrevious() const noexcept
