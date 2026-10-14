@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "jclassfile/invalid_class_exception.hpp"
+#include "jclassfile/io/class_file_writer.hpp"
 #include "jclassfile/model/class_file.hpp"
 #include "jclassfile/model/class_member.hpp"
 #include "jclassfile/model/field.hpp"
@@ -353,6 +354,51 @@ TEST(ClassFileTest, SetterUpdatesUnderlyingStorage)
     EXPECT_EQ(cf.getThisClass(), &c);
     cf.setSuperClass(&c);
     EXPECT_EQ(cf.getSuperClass(), &c);
+}
+
+// ---------- ClassFile adopt* 所有权采纳入口 ----------
+
+// adoptAttribute：unique_ptr 入 ModelStorage、裸视图出（契约对齐 adoptInstruction）。
+// 外部持有者（模拟 pass 成员）析构后，视图与写路径必须仍然存活——这正是
+// bad_attribute 旁路持有曾产生的 UAF 形态。
+TEST(ClassFileAdoptTest, AdoptAttributeTakesOwnershipSurvivesExternalOwnerDeath)
+{
+    CpUtf8    n("X"), attrName("mjt$adopted");
+    CpClass   c(&n);
+    ClassFile cf(0, 52, std::make_unique<ConstPool>(), 0, &c, nullptr, {}, {}, {}, {});
+    const std::size_t before = cf.ownedNodeCount();
+    {
+        auto attribute = std::make_unique<DefaultAttribute>(&attrName, std::vector<ca::u8>{0xCA});
+        Attribute* view = cf.adoptAttribute(std::move(attribute));
+        cf.attributes().push_back(view);
+    }   // 外部 unique_ptr 已消亡，ClassFile 是唯一所有者。
+    ASSERT_EQ(cf.attributes().size(), 1u);
+    EXPECT_EQ(cf.attributes()[0]->name().text(), "mjt$adopted");
+    EXPECT_EQ(cf.ownedNodeCount(), before + 1);
+
+    jclassfile::io::ClassFileWriter writer;
+    EXPECT_FALSE(writer.write(cf).empty());
+}
+
+TEST(ClassFileAdoptTest, AdoptFieldAndMethodTakeOwnership)
+{
+    CpUtf8    n("X"), fn("f"), ft("I"), mn("m"), mt("()V");
+    CpClass   c(&n);
+    ClassFile cf(0, 52, std::make_unique<ConstPool>(), 0, &c, nullptr, {}, {}, {}, {});
+    const std::size_t before = cf.ownedNodeCount();
+    {
+        auto field  = std::make_unique<Field>(std::vector<const Attribute*>{}, 0, &fn, &ft);
+        auto method = std::make_unique<Method>(std::vector<const Attribute*>{}, 0, &mn, &mt);
+        Field*  fieldView  = cf.adoptField(std::move(field));
+        Method* methodView = cf.adoptMethod(std::move(method));
+        cf.setFields({fieldView});
+        cf.setMethods({methodView});
+    }
+    EXPECT_EQ(cf.ownedNodeCount(), before + 2);
+    ASSERT_EQ(cf.getFields().size(), 1u);
+    ASSERT_EQ(cf.getMethods().size(), 1u);
+    EXPECT_EQ(cf.getFields()[0]->name()->text(), "f");
+    EXPECT_EQ(cf.getMethods()[0]->type()->text(), "()V");
 }
 
 // ---------- InvalidClassException ----------
