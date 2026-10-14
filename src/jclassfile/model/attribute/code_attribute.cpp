@@ -13,14 +13,15 @@ std::vector<const CpEntry*> CodeAttribute::ExceptionTableEntry::cpAccesses() con
 std::vector<const CpEntry*> CodeAttribute::cpAccesses() const
 {
     auto set = Attribute::cpAccesses();
+    for (const Instruction* insn : instructions_) {
+        for (const CpEntry* e : insn->cpAccesses()) set.push_back(e);
+    }
     for (const Attribute* a : attributes_) {
         for (const CpEntry* e : a->cpAccesses()) set.push_back(e);
     }
     for (const ExceptionTableEntry& e : exceptionTable_) {
         for (const CpEntry* ce : e.cpAccesses()) set.push_back(ce);
     }
-    // 阶段 3 Instruction stub 不实现 CpAccessor；阶段 5 真正实现 Instruction/CpRefInstruction
-    // 时在此处调用 insn->cpAccesses()。
     return set;
 }
 

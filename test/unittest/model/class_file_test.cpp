@@ -24,7 +24,9 @@
 #include "jclassfile/model/constant/cp_class.hpp"
 #include "jclassfile/model/constant/cp_entry.hpp"
 #include "jclassfile/model/constant/cp_utf8.hpp"
+#include "jclassfile/model/instruction/cp_ref_instruction.hpp"
 #include "jclassfile/model/instruction/instruction.hpp"
+#include "jclassfile/model/instruction/opcodes.hpp"
 
 using namespace jclassfile::model;
 using jclassfile::io::AttributeHolderType;
@@ -399,6 +401,39 @@ TEST(ClassFileAdoptTest, AdoptFieldAndMethodTakeOwnership)
     ASSERT_EQ(cf.getMethods().size(), 1u);
     EXPECT_EQ(cf.getFields()[0]->name()->text(), "f");
     EXPECT_EQ(cf.getMethods()[0]->type()->text(), "()V");
+}
+
+// ---------- CodeAttribute::cpAccesses 覆盖指令引用 ----------
+
+// 注释承诺的指令循环此前从未实现：Code 属性的 CP 可达集不含指令引用，任何
+// 按 cpAccesses 做可达分析的消费方（placeholder 判活、池裁剪）都会漏算
+// LDC/方法引用等指令操作数。回归钉：cpAccesses 必须含 LDC 条目。
+TEST(CodeAttributeCpAccessesTest, IncludesInstructionReferences)
+{
+    CpUtf8 codeName("Code"), utfTarget("target");
+    CpClass targetCls(&utfTarget);
+    auto    insn =
+        std::make_unique<CpRefInstruction>(Opcodes::LDC, static_cast<const CpEntry*>(&targetCls));
+    const CpEntry* entryView = insn->getEntry();
+
+    CodeAttribute ca(&codeName,
+                     1,
+                     1,
+                     std::vector<const Instruction*>{insn.get()},
+                     {},
+                     {});
+    auto          accesses = ca.cpAccesses();
+    EXPECT_NE(std::find(accesses.begin(), accesses.end(), entryView), accesses.end());
+}
+
+TEST(CodeAttributeCpAccessesTest, EmptyInstructionsStillParses)
+{
+    CpUtf8 codeName("Code");
+    CodeAttribute ca(&codeName, 1, 1, {}, {}, {});
+    // name + 无其他 → 只含属性名条目。
+    auto accesses = ca.cpAccesses();
+    EXPECT_EQ(accesses.size(), 1u);
+    EXPECT_EQ(accesses[0], static_cast<const CpEntry*>(&codeName));
 }
 
 // ---------- InvalidClassException ----------
