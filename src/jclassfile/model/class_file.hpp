@@ -136,6 +136,32 @@ public:
         return storage_.instructions.back().get();
     }
 
+    /// @brief 接管运行期新建的 Attribute（pass 向类挂属性时产出），所有权归入
+    /// ModelStorage，契约同 adoptInstruction：unique_ptr 入、裸视图出；调用方
+    /// 随后把返回指针 push 进 attributes() 完成视图登记。绕过本入口的旁路
+    /// 所有权（外部 unique_ptr 成员等）寿命短于 ClassFile 时即产生悬垂视图。
+    model::Attribute* adoptAttribute(std::unique_ptr<model::Attribute> attribute)
+    {
+        storage_.attributes.push_back(std::move(attribute));
+        return storage_.attributes.back().get();
+    }
+
+    /// @brief 接管运行期新建的 Field，契约同 adoptAttribute；返回指针随后
+    /// push 进 fields() 完成视图登记。
+    model::Field* adoptField(std::unique_ptr<model::Field> field)
+    {
+        storage_.fields.push_back(std::move(field));
+        return storage_.fields.back().get();
+    }
+
+    /// @brief 接管运行期新建的 Method，契约同 adoptAttribute；返回指针随后
+    /// push 进 methods() 完成视图登记。
+    model::Method* adoptMethod(std::unique_ptr<model::Method> method)
+    {
+        storage_.methods.push_back(std::move(method));
+        return storage_.methods.back().get();
+    }
+
 private:
     std::unique_ptr<ConstPool>    pool_;
     std::vector<const CpClass*>   interfaceClasses_;
