@@ -18,13 +18,6 @@ using namespace jclassfile::model;
 namespace Opcodes         = jclassfile::model::Opcodes;
 namespace ReservedOpcodes = jclassfile::model::ReservedOpcodes;
 
-namespace {
-const auto NOP_INSN     = std::make_unique<BasicInstruction>(Opcodes::NOP);
-const auto ALOAD_0_INSN = std::make_unique<BasicInstruction>(Opcodes::ALOAD_0);
-const auto CALOAD_INSN  = std::make_unique<BasicInstruction>(Opcodes::CALOAD);
-const auto RETURN_INSN  = std::make_unique<BasicInstruction>(Opcodes::RETURN);
-}   // namespace
-
 std::vector<std::unique_ptr<Instruction>> IllegalRewritingInstructionsReader::read(
     int opcode, io::IndexableByteStream& is)
 {
