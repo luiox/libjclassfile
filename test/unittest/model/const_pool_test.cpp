@@ -377,3 +377,101 @@ TEST(ConstPoolAddAllTest, IndexedAddAllRejectsZeroSlot)
     batch.push_back(std::make_unique<CpInt>(1));
     EXPECT_THROW(pool.addAll(0, std::move(batch)), std::out_of_range);
 }
+
+// ---------- 迭代器空槽不卡死 ----------
+
+// 游标停在 padding/哨兵槽（宽槽错配的遗留形态）：next() 必须跳进一格返回
+// 真实条目。旧实现返回 nullptr 且游标不动——hasNext 恒真，class_file_writer
+// 写池循环与 transformer 的 pool.forEach 在此永久卡死。
+TEST(ConstPoolIteratorTest, NullSlotSkipsForwardInsteadOfStalling)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpLong>(static_cast<ca::i64>(1)));   // #1 wide + #2 padding
+    pool.add(std::make_unique<CpInt>(7));                          // #3
+    ASSERT_EQ(pool.get(2), nullptr);                               // padding 槽
+
+    auto it        = pool.listIterator(2);   // 故意停在 padding 槽
+    int  steps     = 0;
+    const CpEntry* entry = nullptr;
+    while (it.hasNext()) {
+        entry = it.next();
+        if (++steps > 8) {
+            FAIL() << "iterator stalled on a null (padding) slot";
+            return;
+        }
+        if (entry != nullptr) break;
+    }
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->tag(), CpTag::INTEGER);
+    EXPECT_EQ(entry->index(), 3);
+}
+
+// 正常池从头迭代不受空槽跳过逻辑影响：wide 配对仍按 +2 跳过 padding。
+TEST(ConstPoolIteratorTest, WellFormedPoolStillSkipsWidePadding)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpLong>(static_cast<ca::i64>(1)));   // #1 + padding #2
+    pool.add(std::make_unique<CpInt>(7));                          // #3
+    pool.add(std::make_unique<CpUtf8>("x"));                       // #4
+
+    auto                          it    = pool.iterator();
+    std::vector<const CpEntry*>   seen;
+    while (it.hasNext()) seen.push_back(it.next());
+    ASSERT_EQ(seen.size(), 3u);
+    EXPECT_EQ(seen[0]->tag(), CpTag::LONG);
+    EXPECT_EQ(seen[1]->tag(), CpTag::INTEGER);
+    EXPECT_EQ(seen[2]->tag(), CpTag::UTF8);
+}
+
+// ---------- set 宽槽配对强校验 ----------
+
+TEST(ConstPoolSetTest, WideSlotMismatchRejected)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpLong>(static_cast<ca::i64>(1)));   // #1 wide + #2 padding
+    // wide → 窄：拒绝（旧实现静默接受，留下孤儿 padding 卡死迭代器）。
+    EXPECT_THROW(pool.set(1, std::make_unique<CpInt>(9)), std::invalid_argument);
+    // 原条目不受影响。
+    ASSERT_NE(pool.get(1), nullptr);
+    EXPECT_EQ(pool.get(1)->tag(), CpTag::LONG);
+    EXPECT_EQ(static_cast<const CpLong*>(pool.get(1))->value(), 1);
+}
+
+TEST(ConstPoolSetTest, NarrowToWideMismatchRejected)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpInt>(7));   // #1 窄
+    pool.add(std::make_unique<CpInt>(8));   // #2 窄
+    // 窄 → wide：拒绝（无 padding 位可配对，迭代器会把 #2 当 padding 跳掉）。
+    EXPECT_THROW(pool.set(1, std::make_unique<CpLong>(static_cast<ca::i64>(9))),
+                 std::invalid_argument);
+    EXPECT_EQ(pool.get(1)->tag(), CpTag::INTEGER);
+}
+
+TEST(ConstPoolSetTest, SetIntoPaddingSlotRejected)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpLong>(static_cast<ca::i64>(1)));   // #1 wide + #2 padding
+    EXPECT_THROW(pool.set(2, std::make_unique<CpInt>(9)), std::invalid_argument);
+}
+
+TEST(ConstPoolSetTest, SameWidthReplaceStillWorks)
+{
+    ConstPool pool;
+    pool.add(std::make_unique<CpLong>(static_cast<ca::i64>(1)));   // #1 wide + #2 padding
+    // wide → wide：同宽替换合法。
+    pool.set(1, std::make_unique<CpLong>(static_cast<ca::i64>(42)));
+    ASSERT_NE(pool.get(1), nullptr);
+    EXPECT_EQ(pool.get(1)->tag(), CpTag::LONG);
+    EXPECT_EQ(static_cast<const CpLong*>(pool.get(1))->value(), 42);
+    EXPECT_EQ(pool.get(1)->index(), 1);
+    // padding 位保持配对。
+    EXPECT_EQ(pool.get(2), nullptr);
+
+    // 窄 → 窄：同宽替换合法。
+    ConstPool narrow;
+    narrow.add(std::make_unique<CpInt>(7));
+    narrow.set(1, std::make_unique<CpUtf8>("x"));
+    ASSERT_NE(narrow.get(1), nullptr);
+    EXPECT_EQ(narrow.get(1)->tag(), CpTag::UTF8);
+}

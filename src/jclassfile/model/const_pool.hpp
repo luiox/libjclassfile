@@ -4,7 +4,8 @@
 //       上游 c73b1808 补齐 add(int,·) / addAll(int,·)（保持传入集合顺序）。
 //       backing 存 std::vector<std::unique_ptr<CpEntry>>，index 0 预置 ImplZero 哨兵。
 //       wide entry（LONG/DOUBLE）后追加 ImplWidePadding 占位，get() 对 tag<=0 返回 nullptr。
-//       CpIterator 跳过 padding，仅返回真实 entry。
+//       CpIterator 跳过 padding（含宽槽错配遗留的孤儿 padding，游标跳进一格），
+//       仅返回真实 entry，永不因空槽卡死。
 
 #pragma once
 
@@ -68,7 +69,9 @@ public:
     bool addAll(int index, std::vector<std::unique_ptr<CpEntry>> entries);
 
     // set：替换 index 处的 entry，转交所有权，调用方放弃对原 entry 的引用。
-    //      若新 entry 为 wide，旧 wide padding 保留（不会移除）；调用方需自行保证 wide 配对。
+    //      宽槽配对强校验：padding 槽不可替换；新 entry 与旧 entry 宽窄错配
+    //      抛 std::invalid_argument（否则留下孤儿 padding 卡死迭代器）。
+    //      index 越界或 cp 为空时静默忽略（与 add 的宽容口径一致）。
     void set(int index, std::unique_ptr<CpEntry> cp);
 
     // remove：返回被移除的 entry（移出所有权），自动重排后续 index。

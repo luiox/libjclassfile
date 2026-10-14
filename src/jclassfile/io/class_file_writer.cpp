@@ -193,7 +193,12 @@ std::vector<ca::u8> ClassFileWriter::write(model::ClassFile& clazz)
 
 void ClassFileWriter::writeCpEntry(util::GrowingByteBuffer& out, const CpEntry* entry)
 {
-    if (!entry) return;
+    // 旧实现静默 return：写池循环里一个被跳过的条目会让输出池槽位整体错位，
+    // 且若迭代器在空槽上卡死（宽槽错配遗留孤儿 padding），hasNext 循环配合
+    // 这里的静默返回就是死循环。空 entry 显式拒绝。
+    if (!entry) {
+        throw InvalidClassException("Cannot write a null constant-pool entry");
+    }
     CpTag tag = entry->tag();
     out.put(static_cast<int>(tag));
     switch (tag) {
